@@ -80,10 +80,17 @@ Return only the text (first line + bullets).
     const timeout = setTimeout(() => controller.abort(), 22000);
 
     async function call(model: string) {
+      const messages = [{ role: "system", content: system }, { role: "user", content: user }];
+      const payload: any = { model, messages, temperature: 0.6 };
+      if (/^(gpt-4\.1|gpt-5|o3|o4)/i.test(model)) {
+        payload.max_completion_tokens = MAX_TOKENS;
+      } else {
+        payload.max_tokens = MAX_TOKENS;
+      }
       return fetch(`${BASE}/chat/completions`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.AI_API_KEY}` },
-        body: JSON.stringify({ model, messages: [{ role: "system", content: system }, { role: "user", content: user }], max_tokens: MAX_TOKENS, temperature: 0.6 }),
+        body: JSON.stringify(payload),
         signal: controller.signal,
       });
     }
