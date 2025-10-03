@@ -19,49 +19,51 @@ export async function OPTIONS(req: Request) {
   return new Response(null, { status: 204, headers: cors(origin) });
 }
 
-export async function POST(req: Request): Promise<Response> {
+export async function POST(req: Request) {
   const origin = req.headers.get("origin") || undefined;
+  const cors = {
+    "Access-Control-Allow-Origin": process.env.ALLOWED_ORIGINS || "*",
+    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    Vary: "Origin",
+  };
+
+  const requestId = crypto.randomUUID();
+  const t0 = Date.now();
 
   try {
-    const {
-      role,                // "Leadership" | "Individual Contributor" | "Generalist" | "Overall" | custom
-      resume,              // your resume JSON
-      emoji = true,        // sprinkle emojis on bullets
-      max_bullets = 6      // 4–6 reads best
-    } = await req.json();
+    const body = await req.json().catch(() => ({}));
+    const role  = (body?.role ?? "").toString().trim();
+    const resume = body?.resume;
+    const emoji = body?.emoji !== false;
+    const voice = body?.voice === "third" ? "third" : "first";
+    const max_bullets = Number(body?.max_bullets || 5);
 
-    const roleRules: Record<string, string> = {
-      "Leadership":
-        "Prioritise team leadership, ownership, cross-functional coordination, mentoring, strategy, decision-making, business impact. Avoid deep hands-on claims unless explicitly evidenced.",
-      "Individual Contributor":
-        "Prioritise hands-on engineering: architecture decisions, performance work, complex features, tooling/tests, measurable technical impact. Avoid people-management claims unless explicitly evidenced.",
-      "Generalist":
-        "Prioritise breadth across iOS/Android, end-to-end delivery, adaptability across stack, shipping from spec to store. Avoid managerial claims unless explicitly evidenced.",
-      "Overall":
-        "Balanced selection across impact, performance, architecture, delivery; keep it concise and representative."
-    };
-
-    const guidance =
-      roleRules[role] ?? `Emphasise ${role.toLowerCase()} responsibilities; avoid claims not supported by the resume.`;
+    if (!role || !resume || typeof resume !== "object") {
+      const msg = `Bad Request: role=${!!role}, resumeIsObject=${typeof resume === "object"}`;
+      console.error("[ai-summary]", requestId, "bad_input", msg, { role, type: typeof resume });
+      return new Response(JSON.stringify({ error: msg, requestId }), {
+        status: 400, headers: { "Content-Type": "application/json", "X-Request-Id": requestId, ...cors },
+      });
+    }
 
     const system = `You are an expert career writer for mobile engineers. Be truthful, specific, and readable.`;
-
     const user = `
 Role: ${role}
-Guidance: ${guidance}
 
 WRITE THE OUTPUT AS:
-1) First line: "As a/an ${role}, ..." (use the correct article "a" or "an" automatically).
-2) Then ${max_bullets} or fewer bullet points. Each bullet must be directly supported by the resume JSON and clearly relevant to the role above.
-   - Keep bullets short and scannable (≈12–20 words).
-   - Lead with concrete action or metric. If a detail isn't in the resume JSON, do not mention it.
-   - ${emoji ? "Add a relevant emoji at the start of each bullet (1 emoji per bullet, optional)." : "Do not add emojis."}
-   - If a commonly expected aspect of the role isn't evidenced, simply omit it (do not speculate).
+1) First line: "As a/an ${role}, ..." (use the correct article automatically).
+2) Then ${max_bullets} or fewer bullet points, all directly supported by the resume JSON and relevant to the role.
+   - Keep bullets short and scannable.
+   - Lead with concrete action/metric; omit anything not evidenced.
+   - ${emoji ? "Start each bullet with one relevant emoji (optional)." : "Do not add emojis."}
 
 Constraints:
 - No paragraphs after the first line; only bullets.
-- No biography preamble (name/years/place).
+- No biography (no name/years/location).
 - No invented facts.
+
+Voice: ${voice === "third" ? "third person (no name)" : "first person (“I”)"}.
 
 Resume JSON:
 ${JSON.stringify(resume, null, 2)}
@@ -69,45 +71,60 @@ ${JSON.stringify(resume, null, 2)}
 Return only the text (first line + bullets).
 `.trim();
 
-    const base = process.env.AI_BASE_URL || "https://api.openai.com/v1";
-    const model = process.env.AI_MODEL || "gpt-5";
-    const r = await fetch(`${base}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.AI_API_KEY}`
-      },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: user }
-        ],
-        max_tokens: Number(process.env.AI_MAX_TOKENS || 280),
-        temperature: 0.6
-      })
-    });
+    const BASE = process.env.AI_BASE_URL || "https://api.openai.com/v1";
+    const PRIMARY = process.env.AI_MODEL || "gpt-5";
+    const FALLBACK = process.env.AI_MODEL_FALLBACK || "gpt-4.1-mini";
+    const MAX_TOKENS = Number(process.env.AI_MAX_TOKENS || 260);
 
-    if (!r.ok) {
-      const msg = await r.text();
-      return new Response(JSON.stringify({ error: msg }), {
-        status: 500,
-        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": process.env.ALLOWED_ORIGINS || "*" }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 22000);
+
+    async function call(model: string) {
+      return fetch(`${BASE}/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.AI_API_KEY}` },
+        body: JSON.stringify({ model, messages: [{ role: "system", content: system }, { role: "user", content: user }], max_tokens: MAX_TOKENS, temperature: 0.6 }),
+        signal: controller.signal,
       });
     }
 
-    const json = await r.json();
-    const summary = json.choices?.[0]?.message?.content?.trim() || "";
+    console.log("[ai-summary]", requestId, "start", { role, model: PRIMARY, origin });
 
-    return new Response(JSON.stringify({ summary }), {
-      status: 200,
-      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": process.env.ALLOWED_ORIGINS || "*" }
+    let resp = await call(PRIMARY);
+    if (!resp.ok) {
+      const bodyText = await resp.text(); // ← the actual upstream error
+      console.error("[ai-summary]", requestId, "primary_error", { status: resp.status, body: bodyText.slice(0, 2000) });
+
+      if (/model/i.test(bodyText) && /(not|unknown|found|available)/i.test(bodyText)) {
+        resp = await call(FALLBACK);
+        if (!resp.ok) {
+          const fbText = await resp.text();
+          console.error("[ai-summary]", requestId, "fallback_error", { status: resp.status, body: fbText.slice(0, 2000) });
+          return new Response(JSON.stringify({ error: fbText, requestId }), {
+            status: 500, headers: { "Content-Type": "application/json", "X-Request-Id": requestId, ...cors },
+          });
+        }
+      } else {
+        return new Response(JSON.stringify({ error: bodyText, requestId }), {
+          status: 500, headers: { "Content-Type": "application/json", "X-Request-Id": requestId, ...cors },
+        });
+      }
+    }
+
+    clearTimeout(timeout);
+    const json = await resp.json();
+    const summary = json?.choices?.[0]?.message?.content?.trim() || "";
+
+    console.log("[ai-summary]", requestId, "ok", { ms: Date.now() - t0, usedModel: resp.headers.get("openai-model") || PRIMARY });
+
+    return new Response(JSON.stringify({ summary, requestId }), {
+      status: 200, headers: { "Content-Type": "application/json", "X-Request-Id": requestId, ...cors },
     });
   } catch (e: any) {
-    return new Response(JSON.stringify({ error: e?.message || "error" }), {
-      status: 500,
-      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": process.env.ALLOWED_ORIGINS || "*" }
+    const msg = e?.name === "AbortError" ? "Upstream model timed out" : (e?.message || "error");
+    console.error("[ai-summary]", requestId, "exception", { msg, stack: e?.stack });
+    return new Response(JSON.stringify({ error: msg, requestId }), {
+      status: 500, headers: { "Content-Type": "application/json", "X-Request-Id": requestId, ...cors },
     });
   }
 }
-
