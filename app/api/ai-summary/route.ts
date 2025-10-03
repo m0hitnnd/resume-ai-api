@@ -20,81 +20,94 @@ export async function OPTIONS(req: Request) {
 }
 
 export async function POST(req: Request): Promise<Response> {
+  const origin = req.headers.get("origin") || undefined;
+
   try {
-    const origin = req.headers.get("origin") || undefined;
     const {
-      role,          // e.g. "Leadership" | "Individual Contributor" | "Generalist" | "Overall" | "Architecture" | etc.
-      resume,        // your resume JSON
-      emoji = true,  // sprinkle a few emojis (1–3), not mandatory
-      voice = "first"// "first" | "third"
-    } = (await req.json()) as {
-      role: string;
-      resume: any;
-      emoji?: boolean;
-      voice?: "first" | "third";
+      role,                // "Leadership" | "Individual Contributor" | "Generalist" | "Overall" | custom
+      resume,              // your resume JSON
+      emoji = true,        // sprinkle emojis on bullets
+      max_bullets = 6      // 4–6 reads best
+    } = await req.json();
+
+    const roleRules: Record<string, string> = {
+      "Leadership":
+        "Prioritise team leadership, ownership, cross-functional coordination, mentoring, strategy, decision-making, business impact. Avoid deep hands-on claims unless explicitly evidenced.",
+      "Individual Contributor":
+        "Prioritise hands-on engineering: architecture decisions, performance work, complex features, tooling/tests, measurable technical impact. Avoid people-management claims unless explicitly evidenced.",
+      "Generalist":
+        "Prioritise breadth across iOS/Android, end-to-end delivery, adaptability across stack, shipping from spec to store. Avoid managerial claims unless explicitly evidenced.",
+      "Overall":
+        "Balanced selection across impact, performance, architecture, delivery; keep it concise and representative."
     };
 
-    const system = `You are an expert career writer for mobile engineers. Write concise, truthful, specific summaries.`;
+    const guidance =
+      roleRules[role] ?? `Emphasise ${role.toLowerCase()} responsibilities; avoid claims not supported by the resume.`;
 
-    // Minimal, role-deep prompt. No preamble, no name/years.
+    const system = `You are an expert career writer for mobile engineers. Be truthful, specific, and readable.`;
+
     const user = `
-Role focus: ${role}
-Voice: ${voice === "third" ? "third person (no name)" : "first person (“I”)"}.
-Audience: technical reader or recruiter.
+Role: ${role}
+Guidance: ${guidance}
 
-Instructions:
-- Do NOT start with a biography line. Do NOT mention name or years of experience.
-- Start immediately with what ${voice === "third" ? "this person did" : "I did"} *as ${role}*.
-- Go deep on this role only: scope/context → key actions/decisions/trade-offs → concrete impact with numbers where available.
-- Use 2–3 tight mini-paragraphs or short, natural bullets; prioritize readability.
-- ${emoji ? "Use 1–3 subtle emojis where they add clarity (e.g., for impact, architecture, performance)." : "Do not use emojis."}
-- Avoid fluff and generalities. Never invent facts; only use what’s in the resume JSON.
+WRITE THE OUTPUT AS:
+1) First line: "As a/an ${role}, ..." (use the correct article "a" or "an" automatically).
+2) Then ${max_bullets} or fewer bullet points. Each bullet must be directly supported by the resume JSON and clearly relevant to the role above.
+   - Keep bullets short and scannable (≈12–20 words).
+   - Lead with concrete action or metric. If a detail isn't in the resume JSON, do not mention it.
+   - ${emoji ? "Add a relevant emoji at the start of each bullet (1 emoji per bullet, optional)." : "Do not add emojis."}
+   - If a commonly expected aspect of the role isn't evidenced, simply omit it (do not speculate).
+
+Constraints:
+- No paragraphs after the first line; only bullets.
+- No biography preamble (name/years/place).
+- No invented facts.
 
 Resume JSON:
 ${JSON.stringify(resume, null, 2)}
 
-Return only the summary text.
+Return only the text (first line + bullets).
 `.trim();
 
-    const body = {
-      model: process.env.AI_MODEL || "gpt-4.1-mini",
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: user }
-      ]
-    };
+    const base = process.env.AI_BASE_URL || "https://api.openai.com/v1";
+    const model = process.env.AI_MODEL || "gpt-5";
+    const r = await fetch(`${base}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.AI_API_KEY}`
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: user }
+        ],
+        max_tokens: Number(process.env.AI_MAX_TOKENS || 280),
+        temperature: 0.6
+      })
+    });
 
-    const resp = await fetch(
-      `${process.env.AI_BASE_URL || "https://api.openai.com/v1"}/chat/completions`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${process.env.AI_API_KEY}`
-        },
-        body: JSON.stringify(body)
-      }
-    );
-
-    if (!resp.ok) {
-      const err = await resp.text();
-      return new Response(JSON.stringify({ error: err }), {
+    if (!r.ok) {
+      const msg = await r.text();
+      return new Response(JSON.stringify({ error: msg }), {
         status: 500,
-        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": process.env.ALLOWED_ORIGIN || "*" }
+        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": process.env.ALLOWED_ORIGINS || "*" }
       });
     }
 
-    const json = await resp.json();
+    const json = await r.json();
     const summary = json.choices?.[0]?.message?.content?.trim() || "";
 
     return new Response(JSON.stringify({ summary }), {
       status: 200,
-      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": process.env.ALLOWED_ORIGIN || "*" }
+      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": process.env.ALLOWED_ORIGINS || "*" }
     });
   } catch (e: any) {
-    return new Response(JSON.stringify({ error: e.message || "error" }), {
+    return new Response(JSON.stringify({ error: e?.message || "error" }), {
       status: 500,
-      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": process.env.ALLOWED_ORIGIN || "*" }
+      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": process.env.ALLOWED_ORIGINS || "*" }
     });
   }
 }
+
