@@ -81,11 +81,12 @@ Return only the text (first line + bullets).
 
     async function call(model: string) {
       const messages = [{ role: "system", content: system }, { role: "user", content: user }];
-      const payload: any = { model, messages, temperature: 0.6 };
+      const payload: any = { model, messages };
       if (/^(gpt-4\.1|gpt-5|o3|o4)/i.test(model)) {
         payload.max_completion_tokens = MAX_TOKENS;
       } else {
         payload.max_tokens = MAX_TOKENS;
+        payload.temperature = 0.6;
       }
       return fetch(`${BASE}/chat/completions`, {
         method: "POST",
