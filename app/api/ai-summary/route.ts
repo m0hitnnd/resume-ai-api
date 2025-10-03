@@ -22,67 +22,37 @@ export async function OPTIONS(req: Request) {
 export async function POST(req: Request): Promise<Response> {
   try {
     const origin = req.headers.get("origin") || undefined;
-    const {
-      skill,            // "Overall" | "Leadership" | "Individual Contributor" | "Generalist" | custom string
-      focus,
-      resume,
-      format = "bullets",
-      emoji = true,
-      max_bullets = 5,
-    } = (await req.json()) as {
-      skill: string;
-      focus?: string;
-      resume: any;
-      format?: "bullets" | "paragraph";
-      emoji?: boolean;
-      max_bullets?: number;
+    const { focus, resume, emoji = true } = (await req.json()) as {
+      focus: string;         // e.g., "Leadership", "Individual Contributor", "Generalist", "Performance", etc.
+      resume: any;           // your resume JSON
+      emoji?: boolean;       // sprinkle some emojis (1–4)
     };
 
-    // How to slant the summary for each skill view
-    const guidanceBySkill: Record<string, string> = {
-      "Overall":
-        "Balanced view across impact, performance, architecture, and delivery.",
-      "Leadership":
-        "Emphasize leading teams, mentoring, cross-functional collaboration, ownership, decision-making, and business outcomes.",
-      "Individual Contributor":
-        "Emphasize hands-on engineering: performance work, architecture, complex features, tooling, tests, and measurable technical impact.",
-      "Generalist":
-        "Emphasize breadth across iOS/Android, working across stack, adaptability, and end-to-end delivery.",
-    };
+    // ——— Minimal, flexible prompt ———
+    const system = `You are an expert career writer. Produce a short, highly readable summary of a mobile engineer's resume. Be truthful and specific.`;
 
-    const skillGuidance =
-      guidanceBySkill[skill] ||
-      `Emphasize ${skill.toLowerCase()} skills without inventing facts.`;
+    const user = `
+Focus: ${focus || "(none provided)"}
+Audience: a general technical reader or recruiter.
 
-    const styleSpec =
-      format === "bullets"
-        ? `Return PLAIN TEXT (no markdown).
-Start with ONE short headline (<= 18 words), then a blank line, then up to ${max_bullets} bullets.
-Bullets are one sentence each, metric-first where possible.
-${emoji ? "Begin each bullet with a relevant emoji and a short label in Title Case, followed by an em dash (—)." : "Begin each bullet with a hyphen (-) and a short label, then an em dash (—)."}
-Example bullet: ${emoji ? "🚀 Impact — cut p95 launch from ~6s → 2.1s (≈70% faster)." : "- Impact — cut p95 launch from ~6s → 2.1s (≈70% faster)."}
-Avoid filler. NEVER invent facts. Prefer concrete numbers from the resume JSON.`
-        : `Return PLAIN TEXT (no markdown). Write 4–6 short sentences; metric-first; no filler; never invent facts.`;
-
-    const system = `You are an expert resume summarizer for mobile engineers. Be concise, readable, and evidence-based.`;
-
-    const userContent = `Skill View: ${skill}
-Focus: ${focus || "(none)"}
-Guidance: ${skillGuidance}
-
-Style/Format:
-${styleSpec}
+Instructions:
+- Center the summary around the focus above; go into depth on that focus using details from the resume JSON.
+- Keep non-focus areas brief or skip them.
+- Make it friendly and easy to skim with short sentences or natural mini-paragraphs (your choice).
+- ${emoji ? "Sprinkle a few relevant emojis (1–4) where helpful; don't overdo it." : "Do not use emojis."}
+- Do not invent facts; only use what's in the resume JSON.
 
 Resume JSON:
 ${JSON.stringify(resume, null, 2)}
 
-Output only the summary text.`;
+Return only the summary text.
+`.trim();
 
     const body = {
       model: process.env.AI_MODEL || "gpt-4.1-mini",
       messages: [
         { role: "system", content: system },
-        { role: "user", content: userContent },
+        { role: "user", content: user },
       ],
     };
 
@@ -102,7 +72,7 @@ Output only the summary text.`;
       const err = await resp.text();
       return new Response(JSON.stringify({ error: err }), {
         status: 500,
-        headers: { "Content-Type": "application/json", ...cors(origin) },
+        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": process.env.ALLOWED_ORIGIN || "*" },
       });
     }
 
@@ -111,12 +81,12 @@ Output only the summary text.`;
 
     return new Response(JSON.stringify({ summary }), {
       status: 200,
-      headers: { "Content-Type": "application/json", ...cors(origin) },
+      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": process.env.ALLOWED_ORIGIN || "*" },
     });
   } catch (e: any) {
     return new Response(JSON.stringify({ error: e.message || "error" }), {
       status: 500,
-      headers: { "Content-Type": "application/json", ...cors(undefined) },
+      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": process.env.ALLOWED_ORIGIN || "*" },
     });
   }
 }
