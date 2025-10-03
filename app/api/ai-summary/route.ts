@@ -121,6 +121,10 @@ Return only the text (first line + bullets).
 
     clearTimeout(timeout);
     const json = await resp.json();
+    try {
+      const raw = JSON.stringify(json);
+      console.log("[ai-summary]", requestId, "openai_response", raw.slice(0, 2000));
+    } catch (_) {}
     const summary = json?.choices?.[0]?.message?.content?.trim() || "";
 
     console.log("[ai-summary]", requestId, "ok", { ms: Date.now() - t0, usedModel: resp.headers.get("openai-model") || PRIMARY });
